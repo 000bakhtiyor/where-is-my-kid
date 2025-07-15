@@ -21,13 +21,14 @@ export class UsersService {
 
   async createKid(dto: createKidDto) {
     const token = randomUUID();
-
-    return this.userRepo.save({
+    const newKid = this.userRepo.create({
       fullName: dto.fullName,
       parentId: dto.parentId,
       role: Role.Kid,
       setupToken: token,
     });
+
+    return this.userRepo.save(newKid);
   }
 
   async getParentKids(parentId: string) {
@@ -47,6 +48,7 @@ export class UsersService {
   }
 
   async findByToken(token: string) {
+    if (!token) return null;
     return this.userRepo.findOne({
       where: {
         setupToken: token,

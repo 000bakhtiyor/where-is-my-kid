@@ -12,7 +12,7 @@ export class StatusService {
   ) { }
 
   async markSafe(kidId: string) {
-    let status = await this.repo.findOne({ where: { kidId } });
+    let status = await this.repo.findOne({ where: { kidId: kidId } });
     if (!status) {
       status = this.repo.create({ kidId });
     }

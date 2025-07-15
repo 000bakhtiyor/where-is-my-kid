@@ -1,7 +1,7 @@
-// app/(tabs)/_layout.tsx
 import { Tabs } from 'expo-router';
 import FontAwesome from '@expo/vector-icons/FontAwesome';
 import { useColorScheme } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 function TabBarIcon(props: {
   name: React.ComponentProps<typeof FontAwesome>['name'];
@@ -43,8 +43,17 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="map"
         options={{
-          title: 'Map',
-          tabBarIcon: ({ color }) => <TabBarIcon name="map" color={color} />,
+          headerShown: false, // ✅ removes the top nav/title
+          tabBarLabel: 'Xarita',
+          tabBarIcon: ({ color }) => <Ionicons name="map" size={24} color={color} />,
+        }}
+      />
+
+      <Tabs.Screen
+        name="safe-zones"
+        options={{
+          title: 'Xavfsiz joy',
+          tabBarIcon: ({ color }) => <TabBarIcon name="check" color={color} />,
         }}
       />
     </Tabs>

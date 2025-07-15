@@ -21,7 +21,6 @@ export class AuthService {
   async register(createParentDto: CreateParentDto) {
     const existing = await this.usersService.findByPhone(createParentDto.phoneNumber);
     if (existing) throw new ConflictException('Phone number already in use');
-
     const passwordHash = await bcrypt.hash(createParentDto.password, 10);
     const parent = await this.usersService.createParent({
       ...createParentDto,
@@ -68,10 +67,15 @@ export class AuthService {
 
 
   async kidLogin(dto: KidLoginDto) {
+    if (!dto.setupToken) {
+      throw new UnauthorizedException('Setup token is required');
+    }
+    console.log('Attempting kid login with setup token:', dto.setupToken);
     const kid = await this.usersService.findByToken(dto.setupToken);
+    console.log('Kid found:', kid);
     if (!kid) throw new UnauthorizedException('Invalid setup token');
 
-    await this.usersService.clearKidToken(kid.id);
+    // await this.usersService.clearKidToken(kid.id);
 
     const token = this.jwtService.sign({
       sub: kid.id,

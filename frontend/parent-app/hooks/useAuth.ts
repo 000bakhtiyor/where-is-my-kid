@@ -1,18 +1,16 @@
-import { useEffect, useState } from 'react';
+// hooks/useAuthGuard.ts
+import { useEffect } from 'react';
 import * as SecureStore from 'expo-secure-store';
+import { router } from 'expo-router';
 
-export function useAuth() {
-    const [loading, setLoading] = useState(true);
-    const [isAuthenticated, setAuthenticated] = useState(false);
-
+export const useAuthGuard = () => {
     useEffect(() => {
-        const checkToken = async () => {
+        const verify = async () => {
             const token = await SecureStore.getItemAsync('token');
-            setAuthenticated(!!token);
-            setLoading(false);
+            if (!token) {
+                router.replace('/login');
+            }
         };
-        checkToken();
+        verify();
     }, []);
-
-    return { loading, isAuthenticated };
-}
+};

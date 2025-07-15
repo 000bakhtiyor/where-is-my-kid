@@ -11,8 +11,8 @@ export class StatusController {
 
   @Roles(Role.Kid)
   @Post('safe')
-  markSafe(@Req() req) {
-    return this.statusService.markSafe(req.user.id);
+  markSafe(@Body('id') kidId: string) {
+    return this.statusService.markSafe(kidId);
   }
 
   @Roles(Role.Parent)

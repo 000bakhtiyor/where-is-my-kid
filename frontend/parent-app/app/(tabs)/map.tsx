@@ -3,29 +3,31 @@ import {
     View,
     Text,
     StyleSheet,
-    Alert,
     ActivityIndicator,
     Dimensions,
     TouchableOpacity,
     Platform,
-    StatusBar
+    StatusBar,
+    ScrollView,
+    Animated,
+    Easing
 } from 'react-native';
-import MapView, { Marker, PROVIDER_GOOGLE, Region, LatLng } from 'react-native-maps';
-import api from '@/services/api';
+import MapView, { Marker, PROVIDER_GOOGLE, Circle } from 'react-native-maps';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 import * as Animatable from 'react-native-animatable';
+import * as SecureStore from 'expo-secure-store';
+import api from '@/services/api';
 
 // Constants
 const { width, height } = Dimensions.get('window');
-const ASPECT_RATIO = width / height;
 const LATITUDE_DELTA = 0.0922;
-const LONGITUDE_DELTA = LATITUDE_DELTA * ASPECT_RATIO;
+const LONGITUDE_DELTA = LATITUDE_DELTA * (width / height);
 const FETCH_INTERVAL = 10000;
 const STATUS_BAR_HEIGHT = Platform.OS === 'ios' ? 44 : StatusBar.currentHeight;
+const DEFAULT_REGION = { latitude: 41.31, longitude: 69.24 };
 
 // Types
 type KidLocation = {
-    lastUpdate: string;
     id: string;
     kidId: string;
     fullName: string;
@@ -36,259 +38,285 @@ type KidLocation = {
     deviceStatus?: 'online' | 'offline' | 'low-battery';
 };
 
-// Dark Map Theme
-const MAP_DARK_STYLE = [
-    { elementType: "geometry", stylers: [{ color: "#242f3e" }] },
-    { elementType: "labels.text.fill", stylers: [{ color: "#746855" }] },
-    { elementType: "labels.text.stroke", stylers: [{ color: "#242f3e" }] },
-    { featureType: "administrative.locality", elementType: "labels.text.fill", stylers: [{ color: "#d59563" }] },
-    { featureType: "poi", elementType: "labels.text.fill", stylers: [{ color: "#d59563" }] },
-    { featureType: "poi.park", elementType: "geometry", stylers: [{ color: "#263c3f" }] },
-    { featureType: "poi.park", elementType: "labels.text.fill", stylers: [{ color: "#6b9a76" }] },
-    { featureType: "road", elementType: "geometry", stylers: [{ color: "#38414e" }] },
-    { featureType: "road", elementType: "geometry.stroke", stylers: [{ color: "#212a37" }] },
-    { featureType: "road", elementType: "labels.text.fill", stylers: [{ color: "#9ca5b3" }] },
-    { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#746855" }] },
-    { featureType: "road.highway", elementType: "geometry.stroke", stylers: [{ color: "#1f2835" }] },
-    { featureType: "road.highway", elementType: "labels.text.fill", stylers: [{ color: "#f3d19c" }] },
-    { featureType: "transit", elementType: "geometry", stylers: [{ color: "#2f3948" }] },
-    { featureType: "transit.station", elementType: "labels.text.fill", stylers: [{ color: "#d59563" }] },
-    { featureType: "water", elementType: "geometry", stylers: [{ color: "#17263c" }] },
-    { featureType: "water", elementType: "labels.text.fill", stylers: [{ color: "#515c6d" }] },
-    { featureType: "water", elementType: "labels.text.stroke", stylers: [{ color: "#17263c" }] }
-];
+type SafeZone = {
+    id: string;
+    name: string;
+    latitude: number;
+    longitude: number;
+    radius: number;
+};
 
 export default function MapScreen() {
-    // State
     const [locations, setLocations] = useState<KidLocation[]>([]);
+    const [safeZones, setSafeZones] = useState<SafeZone[]>([]);
     const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
-    const [refreshing, setRefreshing] = useState(false);
     const [selectedKid, setSelectedKid] = useState<KidLocation | null>(null);
     const [mapType, setMapType] = useState<'standard' | 'hybrid'>('standard');
-    const [lastUpdated, setLastUpdated] = useState<string>('');
+    const [showSafeZones, setShowSafeZones] = useState(true);
+    const [lastUpdated, setLastUpdated] = useState('');
+    const [refreshing, setRefreshing] = useState(false);
     const mapRef = useRef<MapView>(null);
-    const isMountedRef = useRef(true);
     const cardRef = useRef<any>(null);
+    const pulseAnim = useRef(new Animated.Value(1)).current;
 
-    // Format time difference
+    // Pulse animation for markers
+    useEffect(() => {
+        Animated.loop(
+            Animated.sequence([
+                Animated.timing(pulseAnim, {
+                    toValue: 1.3,
+                    duration: 1000,
+                    easing: Easing.ease,
+                    useNativeDriver: true
+                }),
+                Animated.timing(pulseAnim, {
+                    toValue: 1,
+                    duration: 1000,
+                    easing: Easing.ease,
+                    useNativeDriver: true
+                })
+            ])
+        ).start();
+    }, []);
+
     const formatTimeDifference = (dateString: string) => {
         const now = new Date();
         const date = new Date(dateString);
-        const diffInMinutes = Math.floor((now.getTime() - date.getTime()) / 60000);
-
-        if (diffInMinutes < 1) return "Just now";
-        if (diffInMinutes < 60) return `${diffInMinutes} min ago`;
-        if (diffInMinutes < 1440) return `${Math.floor(diffInMinutes / 60)} hours ago`;
-        return `${Math.floor(diffInMinutes / 1440)} days ago`;
+        const diff = Math.floor((now.getTime() - date.getTime()) / 60000);
+        if (diff < 1) return 'Hozir';
+        if (diff < 60) return `${diff} daqiqa oldin`;
+        if (diff < 1440) return `${Math.floor(diff / 60)} soat oldin`;
+        return `${Math.floor(diff / 1440)} kun oldin`;
     };
 
-    // Fetch locations
-    const fetchLocations = useCallback(async () => {
-        try {
-            const res = await api.get('/location/my-kids/latest');
-            if (isMountedRef.current) {
-                const updatedLocations = res.data.map((loc: KidLocation) => ({
-                    ...loc,
-                    lastUpdate: formatTimeDifference(loc.createdAt),
-                    deviceStatus: getDeviceStatus(loc)
-                }));
-
-                setLocations(updatedLocations);
-                setError(null);
-                setLastUpdated(new Date().toLocaleTimeString());
-            }
-        } catch (err) {
-            if (isMountedRef.current) {
-                setError('Failed to load locations');
-            }
-        } finally {
-            if (isMountedRef.current) {
-                setLoading(false);
-                setRefreshing(false);
-            }
-        }
-    }, []);
-
-    // Determine device status
     const getDeviceStatus = (kid: KidLocation): KidLocation['deviceStatus'] => {
         if (!kid.batteryLevel) return 'online';
         if (kid.batteryLevel < 15) return 'low-battery';
         return 'online';
     };
 
-    // Effects
-    useEffect(() => {
-        isMountedRef.current = true;
-        fetchLocations();
+    const fetchLocations = useCallback(async () => {
+        try {
+            const res = await api.get('/location/my-kids/latest');
+            const updated = res.data.map((loc: KidLocation) => ({
+                ...loc,
+                deviceStatus: getDeviceStatus(loc),
+            }));
+            setLocations(updated);
+            setLastUpdated(new Date().toLocaleTimeString());
+        } catch (e) {
+            console.error('Error fetching locations:', e);
+        } finally {
+            setLoading(false);
+            setRefreshing(false);
+        }
+    }, []);
 
-        const interval = setInterval(fetchLocations, FETCH_INTERVAL);
-        return () => {
-            isMountedRef.current = false;
-            clearInterval(interval);
-        };
+    const fetchSafeZones = useCallback(async () => {
+        try {
+            const token = await SecureStore.getItemAsync('token');
+            const res = await api.get('/zones', {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            setSafeZones(res.data);
+        } catch (e) {
+            console.error('Error fetching zones:', e);
+        }
+    }, []);
+
+    const handleRefresh = useCallback(async () => {
+        setRefreshing(true);
+        await fetchLocations();
     }, [fetchLocations]);
 
-    // Handlers
-    const handleRefresh = () => {
-        setRefreshing(true);
+    useEffect(() => {
         fetchLocations();
-    };
+        fetchSafeZones();
+        const interval = setInterval(fetchLocations, FETCH_INTERVAL);
+        return () => clearInterval(interval);
+    }, [fetchLocations]);
 
     const handleMarkerPress = (kid: KidLocation) => {
         setSelectedKid(kid);
-        cardRef.current?.bounceIn();
+        mapRef.current?.animateCamera({
+            center: {
+                latitude: kid.latitude,
+                longitude: kid.longitude,
+            },
+            zoom: 15,
+            heading: 0,
+            pitch: 0,
+            altitude: 0,
+        }, { duration: 500 });
 
-        mapRef.current?.animateToRegion({
-            latitude: kid.latitude,
-            longitude: kid.longitude,
-            latitudeDelta: LATITUDE_DELTA / 4,
-            longitudeDelta: LONGITUDE_DELTA / 4,
-        }, 500);
+        cardRef.current?.fadeInUp?.(700);
     };
 
-    const handleMapPress = () => {
-        setSelectedKid(null);
-    };
+    const focusAllKids = useCallback(() => {
+        if (!locations.length) return;
 
-    const toggleMapType = () => {
-        setMapType(prev => prev === 'standard' ? 'hybrid' : 'standard');
-    };
-
-    const focusOnAllKids = () => {
-        if (locations.length === 0) return;
-
-        const coordinates: LatLng[] = locations.map(loc => ({
+        const coordinates = locations.map(loc => ({
             latitude: loc.latitude,
             longitude: loc.longitude
         }));
 
         mapRef.current?.fitToCoordinates(coordinates, {
-            edgePadding: { top: 100, right: 50, bottom: 250, left: 50 },
+            edgePadding: { top: 100, bottom: 300, left: 60, right: 60 },
             animated: true,
         });
+    }, [locations]);
+
+    const getStatusIcon = (status: string) => {
+        switch (status) {
+            case 'online': return 'wifi';
+            case 'offline': return 'wifi-off';
+            case 'low-battery': return 'battery-alert';
+            default: return 'wifi';
+        }
     };
 
-    // Render loading state
+    const getStatusColor = (status: string) => {
+        switch (status) {
+            case 'online': return '#10B981';
+            case 'offline': return '#EF4444';
+            case 'low-battery': return '#F59E0B';
+            default: return '#6C63FF';
+        }
+    };
+
     if (loading) {
         return (
             <View style={styles.centered}>
                 <ActivityIndicator size="large" color="#6C63FF" />
-                <Text style={styles.loadingText}>Loading children locations...</Text>
+                <Text style={{ marginTop: 10 }}>Yuklanmoqda...</Text>
             </View>
         );
     }
 
     return (
-        <View style={styles.container}>
-            {/* Map View */}
+        <View style={{ flex: 1 }}>
+            {/* Map */}
             <MapView
                 ref={mapRef}
-                style={styles.map}
+                style={{ flex: 1 }}
                 provider={PROVIDER_GOOGLE}
                 initialRegion={{
                     ...DEFAULT_REGION,
                     latitudeDelta: LATITUDE_DELTA,
                     longitudeDelta: LONGITUDE_DELTA,
                 }}
-                customMapStyle={mapType === 'standard' ? MAP_DARK_STYLE : undefined}
                 mapType={mapType}
-                onPress={handleMapPress}
-                toolbarEnabled={false}
+                showsUserLocation
+                showsMyLocationButton={false}
+                onPress={() => {
+                    cardRef.current?.fadeOutDown?.(300).then(() => setSelectedKid(null));
+                }}
             >
-                {locations.map((loc) => (
-                    <Marker
-                        key={loc.kidId}
-                        coordinate={{
-                            latitude: loc.latitude,
-                            longitude: loc.longitude,
-                        }}
-                        onPress={() => handleMarkerPress(loc)}
-                    >
-                        <Animatable.View
-                            animation={selectedKid?.kidId === loc.kidId ? 'pulse' : undefined}
-                            duration={1000}
-                            style={[
-                                styles.markerContainer,
-                                selectedKid?.kidId === loc.kidId && styles.selectedMarker
-                            ]}
+                {locations.map(loc => {
+                    const isSelected = selectedKid?.kidId === loc.kidId;
+                    return (
+                        <Marker
+                            key={loc.kidId}
+                            coordinate={{ latitude: loc.latitude, longitude: loc.longitude }}
+                            onPress={() => handleMarkerPress(loc)}
                         >
-                            <View style={[
-                                styles.avatar,
-                                loc.deviceStatus === 'offline' && styles.offlineAvatar,
-                                loc.deviceStatus === 'low-battery' && styles.lowBatteryAvatar
+                            <Animated.View style={[
+                                styles.marker,
+                                {
+                                    backgroundColor: getStatusColor(loc.deviceStatus || 'online'),
+                                    transform: [{ scale: isSelected ? pulseAnim : 1 }]
+                                },
+                                isSelected && styles.selectedMarker
                             ]}>
                                 <Icon
-                                    name={
-                                        loc.deviceStatus === 'offline' ? 'wifi-off' :
-                                            loc.deviceStatus === 'low-battery' ? 'battery-alert' :
-                                                'human-child'
-                                    }
-                                    size={24}
-                                    color="white"
+                                    name={getStatusIcon(loc.deviceStatus || 'online')}
+                                    size={20}
+                                    color="#fff"
                                 />
-                            </View>
-                            {selectedKid?.kidId === loc.kidId && (
-                                <Animatable.View
-                                    animation="fadeInUp"
-                                    duration={500}
-                                    style={styles.markerLabel}
-                                >
-                                    <Text style={styles.markerName} numberOfLines={1}>
-                                        {loc.fullName}
-                                    </Text>
-                                </Animatable.View>
-                            )}
-                        </Animatable.View>
-                    </Marker>
+                            </Animated.View>
+                        </Marker>
+                    );
+                })}
+
+                {showSafeZones && safeZones.map(zone => (
+                    <Circle
+                        key={zone.id}
+                        center={{ latitude: zone.latitude, longitude: zone.longitude }}
+                        radius={zone.radius}
+                        fillColor="rgba(76,175,80,0.15)"
+                        strokeColor="#4CAF50"
+                        strokeWidth={1.5}
+                    />
                 ))}
             </MapView>
 
             {/* Header */}
-            <View style={styles.header}>
-                <Text style={styles.headerTitle}>Children Locations</Text>
-                <Text style={styles.headerSubtitle}>
-                    Tracking {locations.length} {locations.length === 1 ? 'child' : 'children'}
-                </Text>
-            </View>
+            <Animatable.View
+                animation="fadeInDown"
+                duration={500}
+                style={styles.mapHeader}
+            >
+                <View style={styles.headerTop}>
+                    <Text style={styles.mapTitle}>📍 Xarita</Text>
+                    <Text style={styles.mapSubtitle}>
+                        {locations.length} bola | Oxirgi yangilanish: {lastUpdated}
+                    </Text>
+                </View>
 
-            {/* Map Controls */}
+                <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    style={styles.kidList}
+                    contentContainerStyle={styles.kidListContent}
+                >
+                    {locations.map(loc => (
+                        <TouchableOpacity
+                            key={loc.kidId}
+                            onPress={() => handleMarkerPress(loc)}
+                            style={[
+                                styles.kidChip,
+                                selectedKid?.kidId === loc.kidId && styles.selectedChip
+                            ]}
+                        >
+                            <Text style={styles.kidName}>{loc.fullName}</Text>
+                        </TouchableOpacity>
+                    ))}
+                </ScrollView>
+            </Animatable.View>
+
+            {/* Controls */}
             <Animatable.View
                 animation="fadeInRight"
                 duration={500}
-                style={styles.controlsContainer}
+                style={styles.controls}
             >
                 <TouchableOpacity
-                    style={styles.controlButton}
+                    style={styles.fab}
                     onPress={handleRefresh}
+                    disabled={refreshing}
                 >
-                    <Icon
-                        name={refreshing ? "refresh" : "refresh"}
-                        size={24}
-                        color="#6C63FF"
-                    />
+                    {refreshing ? (
+                        <ActivityIndicator size="small" color="#6C63FF" />
+                    ) : (
+                        <Icon name="refresh" size={22} color="#6C63FF" />
+                    )}
                 </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={styles.controlButton}
-                    onPress={toggleMapType}
-                >
-                    <Icon
-                        name={mapType === 'standard' ? "earth" : "map"}
-                        size={24}
-                        color="#6C63FF"
-                    />
+                <TouchableOpacity style={styles.fab} onPress={focusAllKids}>
+                    <Icon name="crosshairs-gps" size={22} color="#6C63FF" />
                 </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={styles.controlButton}
-                    onPress={focusOnAllKids}
-                >
-                    <Icon name="view-grid" size={24} color="#6C63FF" />
+                <TouchableOpacity style={styles.fab} onPress={() => setMapType(t => t === 'standard' ? 'hybrid' : 'standard')}>
+                    <Icon name={mapType === 'standard' ? "satellite-variant" : "map"} size={22} color="#6C63FF" />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.fab} onPress={() => setShowSafeZones(v => !v)}>
+                    <Icon
+                        name={showSafeZones ? "shield-check" : "shield-off"}
+                        size={22}
+                        color={showSafeZones ? '#4CAF50' : '#6C63FF'}
+                    />
                 </TouchableOpacity>
             </Animatable.View>
 
-            {/* Selected Kid Card */}
+            {/* Kid Info Card */}
             {selectedKid && (
                 <Animatable.View
                     ref={cardRef}
@@ -296,346 +324,194 @@ export default function MapScreen() {
                     duration={500}
                     style={styles.infoCard}
                 >
-                    <View style={styles.cardHeader}>
-                        <View style={[
-                            styles.avatar,
-                            styles.cardAvatar,
-                            selectedKid.deviceStatus === 'offline' && styles.offlineAvatar,
-                            selectedKid.deviceStatus === 'low-battery' && styles.lowBatteryAvatar
-                        ]}>
-                            <Icon
-                                name={
-                                    selectedKid.deviceStatus === 'offline' ? 'wifi-off' :
-                                        selectedKid.deviceStatus === 'low-battery' ? 'battery-alert' :
-                                            'human-child'
-                                }
-                                size={28}
-                                color="white"
-                            />
-                        </View>
-                        <View>
-                            <Text style={styles.cardTitle}>{selectedKid.fullName}</Text>
-                            <Text style={styles.cardSubtitle}>
-                                {selectedKid.lastUpdate || formatTimeDifference(selectedKid.createdAt)}
-                            </Text>
-                        </View>
+                    <View style={styles.infoHeader}>
+                        <Text style={styles.infoTitle}>{selectedKid.fullName}</Text>
+                        <TouchableOpacity onPress={() => {
+                            cardRef.current?.fadeOutDown?.(300).then(() => setSelectedKid(null));
+                        }}>
+                            <Icon name="close" size={24} color="#4A5568" />
+                        </TouchableOpacity>
                     </View>
 
-                    <View style={styles.cardDetails}>
-                        <View style={styles.detailItem}>
-                            <Icon name="map-marker" size={18} color="#6C63FF" />
-                            <Text style={styles.detailText}>
-                                {selectedKid.latitude.toFixed(5)}, {selectedKid.longitude.toFixed(5)}
-                            </Text>
-                        </View>
+                    <View style={styles.infoRow}>
+                        <Icon name="clock-outline" size={16} color="#4A5568" />
+                        <Text style={styles.infoText}>{formatTimeDifference(selectedKid.createdAt)}</Text>
+                    </View>
 
-                        {selectedKid.batteryLevel && (
-                            <View style={styles.detailItem}>
-                                <Icon
-                                    name={
-                                        selectedKid.batteryLevel > 70 ? "battery" :
-                                            selectedKid.batteryLevel > 30 ? "battery-60" : "battery-20"
-                                    }
-                                    size={18}
-                                    color={
-                                        selectedKid.batteryLevel > 70 ? "#4CAF50" :
-                                            selectedKid.batteryLevel > 30 ? "#FFC107" : "#F44336"
-                                    }
-                                />
-                                <Text style={styles.detailText}>
-                                    Battery: {selectedKid.batteryLevel}%
-                                </Text>
-                            </View>
-                        )}
+                    <View style={styles.infoRow}>
+                        <Icon name="map-marker" size={16} color="#4A5568" />
+                        <Text style={styles.infoText}>
+                            {selectedKid.latitude.toFixed(6)}, {selectedKid.longitude.toFixed(6)}
+                        </Text>
+                    </View>
 
-                        <View style={styles.detailItem}>
+                    {selectedKid.batteryLevel && (
+                        <View style={styles.infoRow}>
                             <Icon
                                 name={
-                                    selectedKid.deviceStatus === 'offline' ? 'wifi-off' :
-                                        selectedKid.deviceStatus === 'low-battery' ? 'alert-circle' :
-                                            'check-circle'
+                                    selectedKid.batteryLevel > 75 ? 'battery-high' :
+                                        selectedKid.batteryLevel > 40 ? 'battery-medium' : 'battery-low'
                                 }
-                                size={18}
+                                size={16}
                                 color={
-                                    selectedKid.deviceStatus === 'offline' ? '#F44336' :
-                                        selectedKid.deviceStatus === 'low-battery' ? '#FFC107' :
-                                            '#4CAF50'
+                                    selectedKid.batteryLevel > 40 ? '#10B981' : '#EF4444'
                                 }
                             />
-                            <Text style={styles.detailText}>
-                                {selectedKid.deviceStatus === 'offline' ? 'Device offline' :
-                                    selectedKid.deviceStatus === 'low-battery' ? 'Low battery' :
-                                        'Device online'}
-                            </Text>
+                            <Text style={styles.infoText}>{selectedKid.batteryLevel}%</Text>
                         </View>
+                    )}
+
+                    <View style={styles.infoRow}>
+                        <Icon
+                            name={getStatusIcon(selectedKid.deviceStatus || 'online')}
+                            size={16}
+                            color={getStatusColor(selectedKid.deviceStatus || 'online')}
+                        />
+                        <Text style={[
+                            styles.infoText,
+                            { color: getStatusColor(selectedKid.deviceStatus || 'online') }
+                        ]}>
+                            {selectedKid.deviceStatus === 'online' ? 'Onlayn' :
+                                selectedKid.deviceStatus === 'low-battery' ? 'Batareya past' :
+                                    'Offlayn'}
+                        </Text>
                     </View>
                 </Animatable.View>
             )}
-
-            {/* Empty State */}
-            {locations.length === 0 && !loading && (
-                <Animatable.View
-                    animation="fadeIn"
-                    duration={500}
-                    style={styles.emptyState}
-                >
-                    <Icon name="map-marker-off" size={48} color="#9e9e9e" />
-                    <Text style={styles.emptyText}>
-                        No location data available
-                    </Text>
-                    <Text style={styles.emptySubtext}>
-                        Make sure your children's devices are turned on and connected
-                    </Text>
-
-                    <TouchableOpacity
-                        style={styles.refreshButton}
-                        onPress={handleRefresh}
-                    >
-                        <Text style={styles.refreshButtonText}>Refresh</Text>
-                    </TouchableOpacity>
-                </Animatable.View>
-            )}
-
-            {/* Status Bar */}
-            <View style={styles.statusBar}>
-                <Text style={styles.statusText}>
-                    {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </Text>
-                <Text style={styles.statusText}>
-                    Updated: {lastUpdated}
-                </Text>
-                <Text style={styles.statusText}>
-                    {locations.length} {locations.length === 1 ? 'child' : 'children'}
-                </Text>
-            </View>
         </View>
     );
 }
 
-// Default region constant
-const DEFAULT_REGION = {
-    latitude: 41.31,
-    longitude: 69.24,
-};
-
-// Styles
 const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        position: 'relative',
-    },
-    map: {
-        flex: 1,
-    },
     centered: {
         flex: 1,
         justifyContent: 'center',
         alignItems: 'center',
-        backgroundColor: '#f8f9fa'
+        backgroundColor: '#fff'
     },
-    loadingText: {
-        marginTop: 16,
-        fontSize: 16,
-        color: '#555',
-        fontWeight: '500'
-    },
-    header: {
+    mapHeader: {
         position: 'absolute',
         top: STATUS_BAR_HEIGHT,
         left: 0,
         right: 0,
-        padding: 20,
-        backgroundColor: 'rgba(255,255,255,0.95)',
-        borderBottomLeftRadius: 20,
-        borderBottomRightRadius: 20,
-        paddingBottom: 25,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.1,
-        shadowRadius: 10,
-        elevation: 5,
-        alignItems: 'center',
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+        backgroundColor: 'rgba(0,0,0,0.7)',
         zIndex: 10,
+        borderBottomLeftRadius: 16,
+        borderBottomRightRadius: 16,
     },
-    headerTitle: {
+    headerTop: {
+        marginBottom: 8
+    },
+    mapTitle: {
         fontSize: 22,
-        fontWeight: '700',
-        color: '#2D3748',
-        marginBottom: 4,
+        fontWeight: 'bold',
+        color: 'white'
     },
-    headerSubtitle: {
+    mapSubtitle: {
         fontSize: 14,
-        color: '#718096',
-        fontWeight: '500'
+        color: '#E2E8F0',
+        marginTop: 4
     },
-    markerContainer: {
-        alignItems: 'center',
+    kidList: {
+        maxHeight: 40,
     },
-    selectedMarker: {
-        zIndex: 10,
+    kidListContent: {
+        paddingVertical: 2
     },
-    avatar: {
-        width: 30,
-        height: 30,
-        borderRadius: 21,
+    kidChip: {
+        backgroundColor: 'rgba(255,255,255,0.9)',
+        borderRadius: 20,
+        paddingVertical: 6,
+        paddingHorizontal: 16,
+        marginRight: 8,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.1,
+        shadowRadius: 3,
+        elevation: 2,
+    },
+    selectedChip: {
         backgroundColor: '#6C63FF',
-        justifyContent: 'center',
-        alignItems: 'center',
+    },
+    kidName: {
+        fontSize: 13,
+        fontWeight: '500',
+        color: '#2D3748',
+    },
+    marker: {
+        padding: 8,
+        borderRadius: 24,
         borderWidth: 2,
-        borderColor: 'white',
+        borderColor: '#fff',
+        alignItems: 'center',
+        justifyContent: 'center',
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 2 },
         shadowOpacity: 0.3,
         shadowRadius: 4,
         elevation: 4,
     },
-    offlineAvatar: {
-        backgroundColor: '#F44336',
+    selectedMarker: {
+        borderWidth: 3,
+        borderColor: '#6C63FF',
+        shadowColor: '#6C63FF',
+        shadowRadius: 8,
+        shadowOpacity: 0.6,
     },
-    lowBatteryAvatar: {
-        backgroundColor: '#FFC107',
-    },
-    markerLabel: {
+    fab: {
         backgroundColor: 'white',
-        paddingVertical: 6,
-        paddingHorizontal: 12,
-        borderRadius: 16,
-        marginTop: 8,
+        borderRadius: 24,
+        width: 48,
+        height: 48,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginVertical: 8,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 2 },
         shadowOpacity: 0.2,
         shadowRadius: 4,
-        elevation: 2,
+        elevation: 4,
     },
-    markerName: {
-        color: '#2D3748',
-        fontWeight: '600',
-        fontSize: 14,
-    },
-    controlsContainer: {
+    controls: {
         position: 'absolute',
-        right: 20,
-        bottom: 180,
-        backgroundColor: 'rgba(255,255,255,0.95)',
-        borderRadius: 20,
-        padding: 8,
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.1,
-        shadowRadius: 10,
-        elevation: 5,
-        zIndex: 10,
-    },
-    controlButton: {
-        padding: 10,
-        marginVertical: 4,
-        backgroundColor: 'rgba(255,255,255,0.7)',
-        borderRadius: 16,
-        justifyContent: 'center',
-        alignItems: 'center',
+        right: 16,
+        bottom: 120,
     },
     infoCard: {
         position: 'absolute',
         bottom: 20,
         left: 20,
         right: 20,
-        backgroundColor: 'rgba(255,255,255,0.95)',
-        borderRadius: 20,
-        padding: 20,
+        backgroundColor: 'white',
+        padding: 16,
+        borderRadius: 16,
         shadowColor: '#000',
         shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.2,
-        shadowRadius: 10,
-        elevation: 5,
-        zIndex: 10,
+        shadowOpacity: 0.15,
+        shadowRadius: 12,
+        elevation: 8,
     },
-    cardHeader: {
+    infoHeader: {
         flexDirection: 'row',
+        justifyContent: 'space-between',
         alignItems: 'center',
-        marginBottom: 16,
+        marginBottom: 12,
     },
-    cardAvatar: {
-        width: 48,
-        height: 48,
-        borderRadius: 24,
-        marginRight: 12,
-    },
-    cardTitle: {
+    infoTitle: {
         fontSize: 18,
         fontWeight: '700',
         color: '#2D3748',
     },
-    cardSubtitle: {
-        fontSize: 14,
-        color: '#718096',
-        marginTop: 2,
-    },
-    cardDetails: {
-        borderTopWidth: 1,
-        borderTopColor: '#EDF2F7',
-        paddingTop: 16,
-    },
-    detailItem: {
+    infoRow: {
         flexDirection: 'row',
         alignItems: 'center',
-        marginBottom: 8,
+        marginVertical: 6,
     },
-    detailText: {
-        marginLeft: 10,
+    infoText: {
         fontSize: 15,
         color: '#4A5568',
-    },
-    emptyState: {
-        ...StyleSheet.absoluteFillObject,
-        justifyContent: 'center',
-        alignItems: 'center',
-        backgroundColor: 'rgba(255,255,255,0.95)',
-        padding: 40,
-        zIndex: 5,
-    },
-    emptyText: {
-        fontSize: 18,
-        fontWeight: '600',
-        color: '#2D3748',
-        marginTop: 16,
-        textAlign: 'center',
-    },
-    emptySubtext: {
-        fontSize: 15,
-        color: '#718096',
-        marginTop: 8,
-        textAlign: 'center',
-        lineHeight: 22,
-    },
-    refreshButton: {
-        marginTop: 24,
-        backgroundColor: '#6C63FF',
-        paddingVertical: 12,
-        paddingHorizontal: 32,
-        borderRadius: 12,
-    },
-    refreshButtonText: {
-        color: 'white',
-        fontWeight: '600',
-        fontSize: 16,
-    },
-    statusBar: {
-        position: 'absolute',
-        left: 0,
-        right: 0,
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        paddingHorizontal: 20,
-        zIndex: 10,
-    },
-    statusText: {
-        color: '#2D3748',
-        fontWeight: '500',
-        backgroundColor: 'rgba(255,255,255,0.7)',
-        paddingHorizontal: 12,
-        paddingVertical: 4,
-        borderRadius: 12,
-        overflow: 'hidden',
-        fontSize: 12,
+        marginLeft: 10,
     },
 });
